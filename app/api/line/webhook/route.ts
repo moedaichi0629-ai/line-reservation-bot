@@ -13,7 +13,7 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   if (!channelSecret) {
     console.error("LINE_CHANNEL_SECRET is not set.");
-    return new NextResponse(null, { status: 500 });
+    return NextResponse.json({ error: "server misconfigured" }, { status: 500 });
   }
 
   // 署名検証には生のリクエストボディが必要なため、必ずJSONパースより先にtext()で取得する。
