@@ -15,7 +15,15 @@ type MenuInsert = WithOptionalColumns<
 >;
 type ConversationInsert = WithOptionalColumns<
   Conversation,
-  "id" | "created_at" | "message_type" | "message_text" | "line_message_id" | "raw_event"
+  | "id"
+  | "created_at"
+  | "message_type"
+  | "message_text"
+  | "line_message_id"
+  | "raw_event"
+  | "confidence"
+  | "matched_faq_ids"
+  | "escalated"
 >;
 
 export interface Database {
