@@ -1,6 +1,6 @@
 import "server-only";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import type { Conversation, Faq, Menu } from "@/types/database";
+import type { Announcement, Conversation, Faq, Menu } from "@/types/database";
 
 /** DBがデフォルト値を持つ、またはNULL許容のカラムをInsert時に省略可能にする */
 type WithOptionalColumns<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
@@ -25,6 +25,17 @@ type ConversationInsert = WithOptionalColumns<
   | "matched_faq_ids"
   | "escalated"
 >;
+type AnnouncementInsert = WithOptionalColumns<
+  Announcement,
+  | "id"
+  | "status"
+  | "retry_key"
+  | "line_request_id"
+  | "error_message"
+  | "created_at"
+  | "sending_started_at"
+  | "sent_at"
+>;
 
 export interface Database {
   public: {
@@ -45,6 +56,12 @@ export interface Database {
         Row: Conversation;
         Insert: ConversationInsert;
         Update: Partial<ConversationInsert>;
+        Relationships: [];
+      };
+      announcements: {
+        Row: Announcement;
+        Insert: AnnouncementInsert;
+        Update: Partial<AnnouncementInsert>;
         Relationships: [];
       };
     };
