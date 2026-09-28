@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 現在のプロジェクト状態
 
-Phase 1-3の実装が完了（Phase 1・2はコミット済み、Phase 3は2026-09-26時点で未コミット）。本番デプロイ前に `docs/deploy-checklist.md` を確認すること。
+Phase 1-3の実装が完了（Phase 3は e70f237 でコミット済み、未push）。本番デプロイ前に `docs/deploy-checklist.md` を確認すること。
 
 **Phase 1**: LINE Webhook (`app/api/line/webhook/route.ts`)、署名検証 (`lib/line/verify-signature.ts`)、会話ログ記録（conversations テーブル）
 
