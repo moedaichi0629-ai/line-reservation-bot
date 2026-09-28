@@ -13,7 +13,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 現在のプロジェクト状態
 
-Phase 1-3の実装が完了（Phase 3は e70f237 でコミット済み、未push）。本番デプロイ前に `docs/deploy-checklist.md` を確認すること。
+Phase 1-3の実装が完了し、GitHub（main）へpush済み・Vercel本番デプロイ済み（GitHub連携のため main へのpushがそのまま本番デプロイになる）。納品用ドキュメント（`docs/` 配下、スクリーンショットは `docs/images/`）も整備済み。デプロイ前後の確認は `docs/deploy-checklist.md`、仕様は `docs/technical-spec.md` を参照すること。ドキュメントを更新するときは実装と突き合わせること（コードが正）。
+
+トップページ（`app/page.tsx`）はポートフォリオ用の静的な紹介ページ。秘密情報・Webhook URL は表示しない。
 
 **Phase 1**: LINE Webhook (`app/api/line/webhook/route.ts`)、署名検証 (`lib/line/verify-signature.ts`)、会話ログ記録（conversations テーブル）
 
@@ -21,8 +23,8 @@ Phase 1-3の実装が完了（Phase 3は e70f237 でコミット済み、未push
 
 **Phase 3**: モバイル管理画面 (`app/admin/`)
 - ログイン (`/admin/login`): パスワード認証、署名付きCookie（30日）
-- FAQ管理 (`/admin/faq`): 作成・編集・削除、変更は即座に反映
-- メニュー・料金 (`/admin/menus`): 作成・編集・削除（Bot未連携）
+- FAQ管理 (`/admin/faq`): 作成・編集・公開/非公開・並び替え（上へ/下へ）・削除、変更は即座に反映
+- メニュー・料金 (`/admin/menus`): 作成・編集・公開/非公開・並び替え・削除（Bot未連携）
 - 会話ログ (`/admin/conversations`): 読み取り専用、顧客IDは末尾4字表示
 - **お知らせ配信** (`/admin/announcements`): 下書き → テスト送信 → 全友だち配信、LINE Broadcast API、状態管理（draft/sending/sent/failed）、二重配信防止（retry key）
 
@@ -30,7 +32,7 @@ DB移行: 0001_init.sql (faq/menus/conversations), 0002_conversation_ai_fields.s
 
 全テーブルでRLS有効、ポリシーなし（デフォルト全拒否）。サーバー側のみ SUPABASE_SERVICE_ROLE_KEY でアクセス。
 
-テスト: vitest で 593テスト、37ファイル。全テストで LINE API/Supabase はモック。
+テスト: vitest で 593テスト、37ファイル。全テストで LINE API/Supabase/Claude はモック。
 
 ## 技術スタック
 
