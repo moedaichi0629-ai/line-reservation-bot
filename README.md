@@ -2,7 +2,7 @@
 
 美容室に届く営業時間・設備などの質問へ、登録済みFAQをもとにAIが回答し、スタッフの問い合わせ対応を支援します。
 
-[作品一覧](https://github.com/moedaichi0629-ai/landing-page) · [ポートフォリオ](https://moedaichi0629-ai.github.io/landing-page/)
+[作品一覧](https://github.com/moedaichi0629-ai/landing-page) · [ポートフォリオ](https://moedaichi0629-ai.github.io/)
 
 <img src="docs/images/admin-dashboard.png" alt="FAQ・会話ログ・配信を管理する画面" width="640">
 
