@@ -19,6 +19,8 @@ import type { Faq } from "@/types/database";
  *   answer/escalate/fallback-error → LINE Reply → outboundログ →
  *   (LOWのみ)オーナーPush
  * の全経路が実際に結線されていることを検証する。
+ * lib/faq/rate-limit.ts（お客様ごとの送信回数の上限）もモックせず、
+ * conversationsテーブルのフェイクに保存された受信ログの件数で実際に判定させる。
  */
 
 const CHANNEL_SECRET = "dummy-channel-secret-do-not-leak";
@@ -81,17 +83,75 @@ const mockFaqEq = vi.fn(() => ({ order: mockFaqOrder }));
 const mockFaqSelect = vi.fn(() => ({ eq: mockFaqEq }));
 
 let insertedInboundMessageIds: Set<string>;
+
+interface StoredInboundRow {
+  line_user_id: string;
+  message_type: string;
+  created_at: string;
+}
+/** 送信回数の判定（件数の問い合わせ）に使う、保存済みの受信ログ */
+let storedInboundRows: StoredInboundRow[];
+
 const mockConversationInsert = vi.fn(
-  async (payload: { direction: string; line_message_id: string | null }) => {
+  async (payload: {
+    direction: string;
+    line_message_id: string | null;
+    line_user_id: string;
+    message_type: string;
+  }) => {
     if (payload.direction === "inbound" && payload.line_message_id) {
       if (insertedInboundMessageIds.has(payload.line_message_id)) {
         return { error: { code: "23505", message: "duplicate key value violates unique constraint" } };
       }
       insertedInboundMessageIds.add(payload.line_message_id);
     }
+    if (payload.direction === "inbound") {
+      storedInboundRows.push({
+        line_user_id: payload.line_user_id,
+        message_type: payload.message_type,
+        created_at: new Date().toISOString(),
+      });
+    }
     return { error: null };
   }
 );
+
+/**
+ * lib/faq/rate-limit.tsが発行する件数クエリ
+ * select(head/count) → eq(line_user_id) → eq(direction=inbound) → eq(message_type) → gte(created_at)
+ * をフェイクする。
+ */
+function conversationCountQuery() {
+  const filters: Record<string, string> = {};
+  const builder = {
+    eq(column: string, value: string) {
+      filters[column] = value;
+      return builder;
+    },
+    async gte(column: string, since: string) {
+      if (column !== "created_at" || filters.direction !== "inbound") {
+        throw new Error("Unexpected conversations count query in integration test");
+      }
+      const count = storedInboundRows.filter(
+        (row) =>
+          row.line_user_id === filters.line_user_id &&
+          row.message_type === filters.message_type &&
+          row.created_at >= since
+      ).length;
+      return { count, error: null };
+    },
+  };
+  return builder;
+}
+const mockConversationSelect = vi.fn(() => conversationCountQuery());
+
+/** 過去に受信したテキストメッセージを、指定した分数だけ前の時刻で保存済みにする */
+function seedInboundTextMessages(count: number, minutesAgo: number): void {
+  const createdAt = new Date(Date.now() - minutesAgo * 60 * 1000).toISOString();
+  for (let i = 0; i < count; i++) {
+    storedInboundRows.push({ line_user_id: USER_ID, message_type: "text", created_at: createdAt });
+  }
+}
 const mockConversationDeleteEq2 = vi.fn(async () => ({ error: null }));
 const mockConversationDeleteEq1 = vi.fn(() => ({ eq: mockConversationDeleteEq2 }));
 const mockConversationDelete = vi.fn(() => ({ eq: mockConversationDeleteEq1 }));
@@ -101,7 +161,11 @@ const mockFrom = vi.fn((table: string) => {
     return { select: mockFaqSelect };
   }
   if (table === "conversations") {
-    return { insert: mockConversationInsert, delete: mockConversationDelete };
+    return {
+      insert: mockConversationInsert,
+      delete: mockConversationDelete,
+      select: mockConversationSelect,
+    };
   }
   throw new Error(`Unexpected Supabase table in integration test: ${table}`);
 });
@@ -114,6 +178,7 @@ import { POST } from "@/app/api/line/webhook/route";
 import {
   API_FAILURE_REPLY_TEXT,
   LOW_CONFIDENCE_REPLY_TEXT,
+  RATE_LIMITED_REPLY_TEXT,
 } from "@/lib/faq/reply-templates";
 
 function sign(body: string, secret: string): string {
@@ -199,7 +264,9 @@ beforeEach(() => {
   mockFaqSelect.mockClear();
 
   insertedInboundMessageIds = new Set();
+  storedInboundRows = [];
   mockConversationInsert.mockClear();
+  mockConversationSelect.mockClear();
   mockConversationDeleteEq2.mockClear();
   mockConversationDeleteEq1.mockClear();
   mockConversationDelete.mockClear();
@@ -209,6 +276,7 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.LINE_CHANNEL_SECRET;
   delete process.env.OWNER_LINE_USER_ID;
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -517,5 +585,115 @@ describe("Phase 2 結合テスト(署名検証→FAQ取得→Claude→ガード�
 
     expect(response.status).toBe(200);
     expect(mockReplyMessage).not.toHaveBeenCalled();
+  });
+
+  describe("お客様ごとの送信回数の上限(lib/faq/rate-limit.tsを実際に実行)", () => {
+    function mockHighAnswer() {
+      mockParse.mockResolvedValue(
+        parsedOutput({
+          answer: "10:00〜19:00です。",
+          confidence: "high",
+          matchedFaqIds: ["faq-1"],
+          reason: "FAQに営業時間が直接記載されている",
+        })
+      );
+    }
+
+    function lastReplyText(): string {
+      const calls = mockReplyMessage.mock.calls;
+      return calls[calls.length - 1]![0].messages[0].text;
+    }
+
+    function pushedTexts(): string {
+      return JSON.stringify(mockPushMessage.mock.calls);
+    }
+
+    it("1時間に10件目まではClaudeで回答し、11件目はClaudeを呼ばず定型文を返してowner Pushを1回、12件目は通知しない", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockHighAnswer();
+      seedInboundTextMessages(9, 10);
+
+      await postWebhook([textMessageEvent({ text: "営業時間は？", messageId: "msg-10" })]);
+      expect(mockParse).toHaveBeenCalledTimes(1);
+      expect(lastReplyText()).toBe("10:00〜19:00です。");
+      expect(mockPushMessage).not.toHaveBeenCalled();
+
+      await postWebhook([textMessageEvent({ text: "営業時間は？", messageId: "msg-11" })]);
+      expect(mockParse).toHaveBeenCalledTimes(1);
+      expect(lastReplyText()).toBe(RATE_LIMITED_REPLY_TEXT);
+      expect(mockPushMessage).toHaveBeenCalledTimes(1);
+      expect(pushedTexts()).toContain("送信回数の上限（1時間に10件）を超えました");
+
+      await postWebhook([textMessageEvent({ text: "営業時間は？", messageId: "msg-12" })]);
+      expect(mockParse).toHaveBeenCalledTimes(1);
+      expect(lastReplyText()).toBe(RATE_LIMITED_REPLY_TEXT);
+      expect(mockPushMessage).toHaveBeenCalledTimes(1);
+
+      const outbounds = mockConversationInsert.mock.calls
+        .map(([payload]) => payload)
+        .filter((payload) => payload.direction === "outbound");
+      expect(outbounds.slice(-2)).toEqual([
+        expect.objectContaining({ confidence: null, matched_faq_ids: null, escalated: true }),
+        expect.objectContaining({ confidence: null, matched_faq_ids: null, escalated: false }),
+      ]);
+    });
+
+    it("1時間より前のメッセージは1時間の上限に数えない", async () => {
+      mockHighAnswer();
+      seedInboundTextMessages(10, 120);
+
+      await postWebhook([textMessageEvent({ text: "営業時間は？", messageId: "msg-new" })]);
+
+      expect(mockParse).toHaveBeenCalledTimes(1);
+      expect(lastReplyText()).toBe("10:00〜19:00です。");
+    });
+
+    it("直近24時間で31件目はClaudeを呼ばず定型文を返し、24時間の上限としてowner Pushする", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockHighAnswer();
+      seedInboundTextMessages(30, 180);
+
+      await postWebhook([textMessageEvent({ text: "営業時間は？", messageId: "msg-31" })]);
+
+      expect(mockParse).not.toHaveBeenCalled();
+      expect(lastReplyText()).toBe(RATE_LIMITED_REPLY_TEXT);
+      expect(mockPushMessage).toHaveBeenCalledTimes(1);
+      expect(pushedTexts()).toContain("送信回数の上限（24時間に30件）を超えました");
+    });
+
+    it("24時間より前のメッセージは数えない", async () => {
+      mockHighAnswer();
+      seedInboundTextMessages(30, 25 * 60);
+
+      await postWebhook([textMessageEvent({ text: "営業時間は？", messageId: "msg-new" })]);
+
+      expect(mockParse).toHaveBeenCalledTimes(1);
+    });
+
+    it("環境変数 RATE_LIMIT_MAX_PER_HOUR で上限を変更できる", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.stubEnv("RATE_LIMIT_MAX_PER_HOUR", "2");
+      mockHighAnswer();
+      seedInboundTextMessages(2, 10);
+
+      await postWebhook([textMessageEvent({ text: "営業時間は？", messageId: "msg-3" })]);
+
+      expect(mockParse).not.toHaveBeenCalled();
+      expect(lastReplyText()).toBe(RATE_LIMITED_REPLY_TEXT);
+      expect(pushedTexts()).toContain("送信回数の上限（1時間に2件）を超えました");
+    });
+
+    it("上限超過の再送(同じline_message_id)では、返信・owner Pushを繰り返さない", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockHighAnswer();
+      seedInboundTextMessages(10, 10);
+      const event = textMessageEvent({ text: "営業時間は？", messageId: "msg-11-redelivered" });
+
+      await postWebhook([event]);
+      await postWebhook([event]);
+
+      expect(mockReplyMessage).toHaveBeenCalledTimes(1);
+      expect(mockPushMessage).toHaveBeenCalledTimes(1);
+    });
   });
 });

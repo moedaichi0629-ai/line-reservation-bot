@@ -11,6 +11,7 @@
 
 - お客様が LINE 公式アカウントへ送った質問に、管理画面で登録した FAQ をもとに Claude が回答する
 - 回答の確信度が低い・根拠となる FAQ が無い場合は、AI の回答を送らずに定型文を返し、オーナーへ LINE で通知する
+- お客様ごとの送信回数に上限を設け、超えた場合は AI を使わずに定型文を返す（6章）
 - 管理画面で FAQ・メニュー・料金の編集、会話ログの閲覧、友だち全員へのお知らせ配信を行う
 
 ---
@@ -32,6 +33,8 @@ sequenceDiagram
     L->>W: Webhook（x-line-signature 付き）
     W->>W: 署名検証（HMAC-SHA256）
     W->>DB: 受信ログ保存（line_message_id 一意）
+    W->>DB: 送信回数を確認（直近1時間・24時間の受信件数）
+    Note over W,C: 上限超過時は Claude を呼ばず定型文を返す（6章）
     W->>DB: 公開中 FAQ を取得
     W->>C: FAQ 一覧 + 質問（構造化出力）
     C-->>W: answer / confidence / matchedFaqIds / reason
@@ -91,14 +94,14 @@ app/
 lib/
   line/        署名検証・LINE クライアント・Push・Broadcast・オーナー通知
   claude/      Claude クライアント・プロンプト・出力スキーマ
-  faq/         回答オーケストレーション・定型文
+  faq/         回答オーケストレーション・定型文・送信回数の上限
   supabase/    サーバー用クライアント・公開 FAQ 取得
   admin/       認証・リポジトリ・お知らせ配信・入力検証
 components/admin/                  管理画面の共通部品
 proxy.ts                           /admin の楽観的認証チェック
 next.config.ts                     /admin のセキュリティヘッダー
 supabase/migrations/               0001〜0003
-tests/                             Vitest（37ファイル / 593テスト）
+tests/                             Vitest（38ファイル / 640テスト）
 ```
 
 ---
@@ -120,7 +123,7 @@ tests/                             Vitest（37ファイル / 593テスト）
 - `message` 以外のイベント（follow 等）は無視
 - `replyToken` が無い場合は無視
 - テキスト以外（画像・スタンプ等） → 「テキストメッセージのみ対応しています。」を返信（Claude は呼ばない）
-- テキスト → 6章の FAQ 回答フロー
+- テキスト → 送信回数の上限を確認（6章）し、超えていなければ FAQ 回答フロー（6章）
 
 ### 重複イベント対策
 
@@ -139,6 +142,8 @@ tests/                             Vitest（37ファイル / 593テスト）
 
 `lib/faq/answer-user-question.ts` → `lib/claude/generate-faq-answer.ts`
 
+テキストメッセージは、まず次の **送信回数の上限** を確認します（`lib/faq/rate-limit.ts`）。超過していなければ、下の 1〜3 を実行します。
+
 1. **公開 FAQ 取得**（`lib/supabase/faq.ts`、`is_published = true`、`display_order` 順）
    - 取得失敗 → `fallback-error`
    - **0件 → Claude を呼ばずに `escalate`**
@@ -154,6 +159,38 @@ tests/                             Vitest（37ファイル / 593テスト）
    - `high` / `medium` でも、有効な `matchedFaqIds` が0件 → `escalate`（強制ダウングレード）
    - それ以外 → `answer`
 
+### 送信回数の上限（`lib/faq/rate-limit.ts`）
+
+お客様ごとの AI 回答の回数を制限し、連投で Claude の利用料と LINE の送信数が増え続けないようにします。
+
+| 項目 | 内容 |
+|---|---|
+| 判定 | 同じ `line_user_id` の受信テキスト（**今回分を含む**）の件数が、直近1時間で **10件**、または直近24時間で **30件** を超えたら制限 |
+| 数える対象 | `conversations` の `direction = inbound` かつ `message_type = text` の行。既存の `conversations_line_user_id_idx` を使い、列・インデックス・マイグレーションは追加していない |
+| 制限中の返信 | Claude を呼ばず、「お問い合わせが多いため、スタッフから改めてご連絡します」を返信（`RATE_LIMITED_REPLY_TEXT`） |
+| 制限中の `conversations`（返信行） | `confidence = null`、`matched_faq_ids = null`、`escalated` は上限を超えた**1件目のみ `true`**、2件目以降は `false` |
+| 連投の扱い | 制限中のメッセージも受信ログに残るため件数に含まれる。連投を続けると、直近の件数が上限を下回るまで制限が続く |
+| オーナー通知 | 件数がちょうど「上限 + 1」になった1件目だけ Push する。理由欄は「送信回数の上限（1時間に10件）を超えました」または「送信回数の上限（24時間に30件）を超えました」 |
+| 制限しない（fail-open） | 件数の取得に失敗した、今回の受信ログを保存できなかった、グループ・ルームで `userId` が無い、テキスト以外。通常どおり FAQ 回答を行う（返信自体は止めない）。重複再送は元の処理で判定済みのため対象外 |
+
+#### 任意の環境変数
+
+未設定なら初期値を使います。秘密情報ではありません。
+
+| 変数名 | 初期値 | 内容 |
+|---|---|---|
+| `RATE_LIMIT_MAX_PER_HOUR` | 10 | 直近1時間の上限 |
+| `RATE_LIMIT_MAX_PER_DAY` | 30 | 直近24時間の上限 |
+
+- 正の整数のみ有効。0・負数・小数・数字以外は警告ログを出して初期値を使う（警告には変数名と初期値のみを出し、設定された値そのものは出さない）
+- 値の変更は Vercel の環境変数で行い、**再デプロイが必要**。管理画面からは変更できない
+
+#### 通知の注意（ベストエフォート）
+
+- オーナー通知は「件数が上限 + 1 になったか」だけで判定し、通知済みのフラグは DB に持たない
+- 同じお客様のメッセージが並行して届くと、通知が **0回または2回** になることがある
+- 通知は1時間枠・24時間枠のそれぞれで上限を超えるたびに行われる（お客様ごとに1回だけではない）
+
 ### 結果ごとの動作
 
 | 結果 | お客様への返信 | `conversations`（返信行） | オーナー通知 |
@@ -161,10 +198,12 @@ tests/                             Vitest（37ファイル / 593テスト）
 | `answer` | Claude の回答（LINE の文字数上限で切り詰め） | `confidence` = high/medium、`matched_faq_ids`、`escalated = false` | なし |
 | `escalate` | 定型文「…スタッフによる確認が必要です。…」（**Claude の回答は送らない**） | `confidence = low`、`escalated = true` | Push あり |
 | `fallback-error` | 定型文「申し訳ございません。現在、自動応答をご利用いただけません。…」 | `confidence = null` | なし |
+| 送信回数の上限超過 | 定型文「お問い合わせが多いため、スタッフから改めてご連絡します」（**Claude は呼ばない**） | `confidence = null`、`matched_faq_ids = null`、`escalated` は1件目のみ `true` | 上限を超えた1件目のみ Push あり |
 
 ### オーナー通知（`lib/line/escalate-to-owner.ts`）
 
 - `OWNER_LINE_USER_ID` 宛に Push。本文は「【要確認の問い合わせ】」+ 質問（500文字まで）+ 理由（200文字まで）+ お客様の LINE ユーザーID
+- 送信回数の上限による通知も、同じ形式（理由のみ「送信回数の上限…」になる）
 - 通知の失敗・未設定でも例外にしない（お客様への返信は済んでいる）
 - `escalated = true` は「通知経路を選んだ」ことを表し、Push が届いたことは表さない
 - Push は LINE の月間送信数を消費する
@@ -273,6 +312,7 @@ LINE とのやり取りのログ（受信・返信の各1行）。
 - `line_message_id`: 受信メッセージの ID。部分一意インデックス（`not null` の行のみ）で重複処理を防ぐ
 - `raw_event`: 受信イベントの JSON（受信行のみ）。管理画面では取得しない
 - `confidence` / `matched_faq_ids` / `escalated`（0002 で追加）: 返信行に AI 判定結果を記録
+- 送信回数の上限（6章）は `direction = inbound` かつ `message_type = text` の件数を数える。専用の列は無い
 
 ### announcements（0003）
 
@@ -364,9 +404,10 @@ Server Action の `redirect()` でページの部品が作り直されるため�
 
 `lib/admin/conversation-repository.ts`
 
-- 一覧: 直近500行を取得してお客様ごとにまとめる。「スタッフ確認あり」は `escalated = true` の直近200行から対象のお客様を抽出
+- 一覧: 直近500行を取得してお客様ごとにまとめる。「スタッフ確認あり」は `escalated = true` の直近200行から対象のお客様を抽出（送信回数の上限の1件目も `escalated = true` のため含まれる）
 - 詳細: URL のキーは `conversations` の行 UUID。サーバー側で `line_user_id` を引くため、**LINE ユーザーID 全体は URL・画面・クライアントに出ない**
 - 表示名は「お客様（末尾xxxx）」（`lib/admin/conversation-labels.ts`）。8文字未満の ID は「お客様（ID不明）」
+- Bot の返信のラベル（`describeBotReply`、同ファイル）は、`escalated` / `confidence` と定型文の**完全一致**で決める。主なラベル: 「送信回数の上限」（`RATE_LIMITED_REPLY_TEXT` と一致。上限を超えた1件目の説明には「オーナーへのLINE通知の対象」と出る）、「スタッフ確認が必要」（`escalated = true`）、「自動回答」（high/medium）、「要確認」（low）、「自動応答エラー」（`API_FAILURE_REPLY_TEXT` と一致）、「定型メッセージ」（その他）。定型文の文言を変えると、過去のログは別のラベルで表示される
 - 受信と返信を組にして新しい順に表示。50行ずつ、`created_at` のカーソルでページング
 - `raw_event` は取得しない
 
@@ -378,7 +419,7 @@ Server Action の `redirect()` でページの部品が作り直されるため�
 |---|---|
 | LINE 署名検証 | 全 Webhook リクエストで HMAC-SHA256 を検証。失敗は `401` で処理しない |
 | service role キー | `lib/supabase/server.ts` のみで使用。`server-only` により Client Component から import するとビルドエラー |
-| 秘密情報 | 8つの環境変数はすべてサーバー側のみで参照。`NEXT_PUBLIC_` の変数は使わない |
+| 秘密情報 | 必須の8つの環境変数はすべてサーバー側のみで参照。任意の `RATE_LIMIT_*` は秘密ではない。`NEXT_PUBLIC_` の変数は使わない |
 | クライアントバンドル | Client Component は `lib/admin/schemas.ts`（Zod）を import しない。上限値は `lib/admin/input-limits.ts` から参照 |
 | RLS | 全4テーブルで有効、ポリシー0件（anon / authenticated は全拒否） |
 | 管理画面 | 全ページ・Server Action・データ関数で `requireAdmin()`。セキュリティヘッダーと `noindex` |
@@ -395,7 +436,7 @@ Server Action の `redirect()` でページの部品が作り直されるため�
 | 制約 | 内容 | 影響・対処 |
 |---|---|---|
 | メニューは Bot 未連携 | `menus` は Claude に渡されない | 料金を Bot に答えさせるには FAQ にも登録する |
-| Webhook の顧客別レート制限なし | 連投のたびに Claude を呼び、低確信度ならオーナー Push を送る | Claude の利用料と LINE の送信数を消費し得る。利用状況を定期確認 |
+| 送信回数の上限はベストエフォート | 直近1時間10件・24時間30件を超えると Claude を呼ばず定型文（6章）。オーナー通知は上限を超えた1件目のみで、同じお客様の並行送信では0回または2回になり得る。件数取得の失敗や受信ログ未保存などでは制限しない（fail-open） | 連投による Claude 利用料・LINE 送信数の増加を抑えるための仕組みで、完全な防止ではない。上限値は環境変数と再デプロイでのみ変更でき、管理画面からは変更できない。利用状況を定期確認 |
 | ログイン試行回数の制限なし | コードは失敗時0.8秒の遅延のみ | Vercel Firewall のレート制限を前提（[deploy-checklist.md](deploy-checklist.md) 4-4）＋長いランダムパスワード |
 | セッションの個別無効化なし | サーバー側にセッション一覧を持たない | `ADMIN_SESSION_SECRET` の変更で全員ログアウトのみ |
 | `sending` の復旧 UI なし | 「状態確認が必要」は SQL で手動対応 | 9章の SQL を参照 |
@@ -413,10 +454,11 @@ Server Action の `redirect()` でページの部品が作り直されるため�
 
 ## 13. テスト
 
-- Vitest、37ファイル / 593テスト（`npm run test`）
+- Vitest、38ファイル / 640テスト（`npm run test`）
 - LINE・Supabase・Claude はすべてモック。実際の送信・DB 書き込みは行わない
 - 主なテスト
-  - `tests/integration/phase2-flow.test.ts`: Webhook ハンドラーを実際に呼ぶ結合テスト（外部 I/O のみモック）
+  - `tests/integration/phase2-flow.test.ts`: Webhook ハンドラーを実際に呼ぶ結合テスト（外部 I/O のみモック）。送信回数の上限も実際の `lib/faq/rate-limit.ts` を通して検証
+  - `tests/lib/faq/rate-limit.test.ts`: 送信回数の上限の判定、環境変数の解釈（不正値は初期値）、通知の1件目判定、fail-open
   - `tests/app/admin/server-actions-auth.test.ts`: 全 Server Action が `requireAdmin()` を呼んでいるか
   - `tests/app/admin/announcements/security.test.ts`: お知らせ配信のセキュリティと、管理画面の全ページが `requireAdmin()` を呼んでいるか
   - `tests/lib/admin/fake-announcements-db.ts`: 0003 の CHECK 制約を再現したインメモリ DB で配信ロジックを検証

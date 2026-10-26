@@ -6,7 +6,11 @@ import {
   formatDateTimeJst,
   maskLineUserId,
 } from "@/lib/admin/conversation-labels";
-import { API_FAILURE_REPLY_TEXT, LOW_CONFIDENCE_REPLY_TEXT } from "@/lib/faq/reply-templates";
+import {
+  API_FAILURE_REPLY_TEXT,
+  LOW_CONFIDENCE_REPLY_TEXT,
+  RATE_LIMITED_REPLY_TEXT,
+} from "@/lib/faq/reply-templates";
 
 const FULL_LINE_USER_ID = "U4af4980629abcdef0123456789abcd12";
 
@@ -99,6 +103,25 @@ describe("describeBotReply", () => {
     expect(label.tone).toBe("neutral");
   });
 
+  it("送信回数上限の定型文 → 送信回数の上限（オーナー通知した1件目かどうかで説明を変える）", () => {
+    const notified = describeBotReply({
+      confidence: null,
+      escalated: true,
+      messageText: RATE_LIMITED_REPLY_TEXT,
+    });
+    expect(notified.label).toBe("送信回数の上限");
+    expect(notified.tone).toBe("warning");
+    expect(notified.description).toContain("オーナーへのLINE通知の対象です");
+
+    const notNotified = describeBotReply({
+      confidence: null,
+      escalated: false,
+      messageText: RATE_LIMITED_REPLY_TEXT,
+    });
+    expect(notNotified.label).toBe("送信回数の上限");
+    expect(notNotified.description).not.toContain("オーナーへのLINE通知の対象です");
+  });
+
   it("どのラベルも内部値(high/medium/low/escalated/null)をそのまま表示しない", () => {
     const cases = [
       describeBotReply({ confidence: "high", escalated: false, messageText: "a" }),
@@ -107,6 +130,8 @@ describe("describeBotReply", () => {
       describeBotReply({ confidence: "low", escalated: false, messageText: "a" }),
       describeBotReply({ confidence: null, escalated: false, messageText: API_FAILURE_REPLY_TEXT }),
       describeBotReply({ confidence: null, escalated: false, messageText: null }),
+      describeBotReply({ confidence: null, escalated: true, messageText: RATE_LIMITED_REPLY_TEXT }),
+      describeBotReply({ confidence: null, escalated: false, messageText: RATE_LIMITED_REPLY_TEXT }),
     ];
     for (const { label, description } of cases) {
       expect(`${label}${description}`).not.toMatch(/high|medium|low|escalat|null|confidence/i);

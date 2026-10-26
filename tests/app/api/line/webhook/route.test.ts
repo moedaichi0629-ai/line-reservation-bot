@@ -21,15 +21,21 @@ vi.mock("@/lib/line/escalate-to-owner", () => ({
   notifyOwnerOfEscalation: vi.fn(),
 }));
 
+vi.mock("@/lib/faq/rate-limit", () => ({
+  checkUserRateLimit: vi.fn(),
+}));
+
 import { POST } from "@/app/api/line/webhook/route";
 import { verifyLineSignature } from "@/lib/line/verify-signature";
 import { getLineClient } from "@/lib/line/client";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { answerUserQuestion } from "@/lib/faq/answer-user-question";
 import { notifyOwnerOfEscalation } from "@/lib/line/escalate-to-owner";
+import { checkUserRateLimit } from "@/lib/faq/rate-limit";
 import {
   API_FAILURE_REPLY_TEXT,
   LOW_CONFIDENCE_REPLY_TEXT,
+  RATE_LIMITED_REPLY_TEXT,
 } from "@/lib/faq/reply-templates";
 
 const mockVerifyLineSignature = vi.mocked(verifyLineSignature);
@@ -37,6 +43,7 @@ const mockGetLineClient = vi.mocked(getLineClient);
 const mockCreateSupabaseServerClient = vi.mocked(createSupabaseServerClient);
 const mockAnswerUserQuestion = vi.mocked(answerUserQuestion);
 const mockNotifyOwnerOfEscalation = vi.mocked(notifyOwnerOfEscalation);
+const mockCheckUserRateLimit = vi.mocked(checkUserRateLimit);
 
 const CHANNEL_SECRET = "dummy-channel-secret-do-not-leak";
 const REPLY_TOKEN = "dummy-reply-token";
@@ -153,6 +160,8 @@ beforeEach(() => {
   mockAnswerUserQuestion.mockReset();
   mockNotifyOwnerOfEscalation.mockReset();
   mockNotifyOwnerOfEscalation.mockResolvedValue({ ok: true });
+  mockCheckUserRateLimit.mockReset();
+  mockCheckUserRateLimit.mockResolvedValue({ kind: "allowed" });
 });
 
 afterEach(() => {
@@ -491,5 +500,216 @@ describe("POST /api/line/webhook", () => {
     });
     // line_user_idを解決できないため、inbound/outboundいずれのconversationsログも書き込まれない。
     expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  describe("お客様ごとの送信回数の上限", () => {
+    const HOUR_REASON = "送信回数の上限（1時間に10件）を超えました";
+
+    function answerResult() {
+      return {
+        kind: "answer" as const,
+        answer: "10:00〜19:00です。",
+        confidence: "high" as const,
+        matchedFaqIds: ["faq-a"],
+      };
+    }
+
+    it("20. 上限内(allowed)なら、受信ログ保存後に送信者のIDで判定し、通常どおりClaudeで回答する", async () => {
+      mockAnswerUserQuestion.mockResolvedValue(answerResult());
+
+      await postWebhook([textMessageEvent()]);
+
+      expect(mockCheckUserRateLimit).toHaveBeenCalledTimes(1);
+      expect(mockCheckUserRateLimit).toHaveBeenCalledWith(USER_ID);
+      expect(mockInsert.mock.invocationCallOrder[0]).toBeLessThan(
+        mockCheckUserRateLimit.mock.invocationCallOrder[0]
+      );
+      expect(mockAnswerUserQuestion).toHaveBeenCalledTimes(1);
+      expect(mockReplyMessage).toHaveBeenCalledWith({
+        replyToken: REPLY_TOKEN,
+        messages: [{ type: "text", text: "10:00〜19:00です。" }],
+      });
+    });
+
+    it("21. 上限を超えた1件目は、Claudeを呼ばずに定型文を返信し、オーナーへ1回通知する", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockCheckUserRateLimit.mockResolvedValue({
+        kind: "limited",
+        notifyOwner: true,
+        reason: HOUR_REASON,
+      });
+
+      const response = await postWebhook([textMessageEvent()]);
+
+      expect(response.status).toBe(200);
+      expect(mockAnswerUserQuestion).not.toHaveBeenCalled();
+      expect(mockReplyMessage).toHaveBeenCalledTimes(1);
+      expect(mockReplyMessage).toHaveBeenCalledWith({
+        replyToken: REPLY_TOKEN,
+        messages: [{ type: "text", text: RATE_LIMITED_REPLY_TEXT }],
+      });
+      expect(mockNotifyOwnerOfEscalation).toHaveBeenCalledTimes(1);
+      expect(mockNotifyOwnerOfEscalation).toHaveBeenCalledWith({
+        question: DEFAULT_QUESTION,
+        reason: HOUR_REASON,
+        lineUserId: USER_ID,
+      });
+    });
+
+    it("22. 上限を超えた1件目のoutboundログは confidence:null/matched_faq_ids:null/escalated:true", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockCheckUserRateLimit.mockResolvedValue({
+        kind: "limited",
+        notifyOwner: true,
+        reason: HOUR_REASON,
+      });
+
+      await postWebhook([textMessageEvent()]);
+
+      expect(mockInsert).toHaveBeenCalledTimes(2);
+      expect(mockInsert).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          direction: "outbound",
+          message_text: RATE_LIMITED_REPLY_TEXT,
+          confidence: null,
+          matched_faq_ids: null,
+          escalated: true,
+        })
+      );
+    });
+
+    it("23. 上限超過の2件目以降は、定型文を返信するがオーナーへは通知せず、escalated:falseで記録する", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockCheckUserRateLimit.mockResolvedValue({
+        kind: "limited",
+        notifyOwner: false,
+        reason: HOUR_REASON,
+      });
+
+      await postWebhook([textMessageEvent()]);
+
+      expect(mockAnswerUserQuestion).not.toHaveBeenCalled();
+      expect(mockReplyMessage).toHaveBeenCalledWith({
+        replyToken: REPLY_TOKEN,
+        messages: [{ type: "text", text: RATE_LIMITED_REPLY_TEXT }],
+      });
+      expect(mockNotifyOwnerOfEscalation).not.toHaveBeenCalled();
+      expect(mockInsert).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          direction: "outbound",
+          message_text: RATE_LIMITED_REPLY_TEXT,
+          escalated: false,
+        })
+      );
+    });
+
+    it("24. 上限超過時のログに顧客IDや質問本文を出さない", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockCheckUserRateLimit.mockResolvedValue({
+        kind: "limited",
+        notifyOwner: true,
+        reason: HOUR_REASON,
+      });
+
+      await postWebhook([textMessageEvent()]);
+
+      const calls = [...warnSpy.mock.calls, ...errorSpy.mock.calls];
+      expect(loggedArgsContain(calls, USER_ID)).toBe(false);
+      expect(loggedArgsContain(calls, DEFAULT_QUESTION)).toBe(false);
+    });
+
+    it("25. 判定できなかった場合(unchecked)は、制限せず通常どおりClaudeで回答する", async () => {
+      mockCheckUserRateLimit.mockResolvedValue({ kind: "unchecked", cause: "count_failed" });
+      mockAnswerUserQuestion.mockResolvedValue(answerResult());
+
+      await postWebhook([textMessageEvent()]);
+
+      expect(mockAnswerUserQuestion).toHaveBeenCalledTimes(1);
+      expect(mockReplyMessage).toHaveBeenCalledWith({
+        replyToken: REPLY_TOKEN,
+        messages: [{ type: "text", text: "10:00〜19:00です。" }],
+      });
+    });
+
+    it("26. 受信ログの保存に失敗した場合は判定せず、通常どおりClaudeで回答する", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      mockInsert.mockResolvedValueOnce({ error: { code: "XX000", message: "db down" } });
+      mockAnswerUserQuestion.mockResolvedValue(answerResult());
+
+      await postWebhook([textMessageEvent()]);
+
+      expect(mockCheckUserRateLimit).not.toHaveBeenCalled();
+      expect(mockAnswerUserQuestion).toHaveBeenCalledTimes(1);
+    });
+
+    it("27. テキスト以外のメッセージは判定しない", async () => {
+      await postWebhook([stickerMessageEvent()]);
+
+      expect(mockCheckUserRateLimit).not.toHaveBeenCalled();
+    });
+
+    it("28. 重複(duplicate)として処理をスキップした場合は判定しない(再送で件数・通知が重複しない)", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockInsert.mockResolvedValueOnce({ error: { code: "23505", message: "duplicate" } });
+
+      await postWebhook([textMessageEvent()]);
+
+      expect(mockCheckUserRateLimit).not.toHaveBeenCalled();
+      expect(mockReplyMessage).not.toHaveBeenCalled();
+    });
+
+    it("30. 上限超過の定型文の返信に失敗した場合、オーナーへ通知せず、inboundログを取り消して再送を通す", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      mockCheckUserRateLimit.mockResolvedValue({
+        kind: "limited",
+        notifyOwner: true,
+        reason: HOUR_REASON,
+      });
+      mockReplyMessage.mockRejectedValue(new Error("LINE API error"));
+
+      const response = await postWebhook([textMessageEvent({ messageId: "msg-limited-retry" })]);
+
+      expect(response.status).toBe(200);
+      expect(mockNotifyOwnerOfEscalation).not.toHaveBeenCalled();
+      expect(mockDelete).toHaveBeenCalledTimes(1);
+      expect(mockDeleteEq1).toHaveBeenCalledWith("line_message_id", "msg-limited-retry");
+      expect(mockDeleteEq2).toHaveBeenCalledWith("direction", "inbound");
+    });
+
+    it("31. オーナー通知が届かなかった場合({ok:false})も、返信とログは完了しており取り消さない", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockCheckUserRateLimit.mockResolvedValue({
+        kind: "limited",
+        notifyOwner: true,
+        reason: HOUR_REASON,
+      });
+      mockNotifyOwnerOfEscalation.mockResolvedValue({ ok: false, reason: "push_failed" });
+
+      const response = await postWebhook([textMessageEvent()]);
+
+      expect(response.status).toBe(200);
+      expect(mockReplyMessage).toHaveBeenCalledWith({
+        replyToken: REPLY_TOKEN,
+        messages: [{ type: "text", text: RATE_LIMITED_REPLY_TEXT }],
+      });
+      expect(mockInsert).toHaveBeenLastCalledWith(
+        expect.objectContaining({ direction: "outbound", message_text: RATE_LIMITED_REPLY_TEXT })
+      );
+      expect(mockDelete).not.toHaveBeenCalled();
+    });
+
+    it("29. userIdが存在しない場合(グループ/ルーム)は判定せず、通常どおり回答する", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockAnswerUserQuestion.mockResolvedValue(answerResult());
+      const event = textMessageEvent();
+      event.source = { type: "group", groupId: "dummy-group-id" };
+
+      await postWebhook([event]);
+
+      expect(mockCheckUserRateLimit).not.toHaveBeenCalled();
+      expect(mockAnswerUserQuestion).toHaveBeenCalledTimes(1);
+    });
   });
 });

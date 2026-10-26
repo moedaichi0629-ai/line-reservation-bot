@@ -32,7 +32,7 @@ DB移行: 0001_init.sql (faq/menus/conversations), 0002_conversation_ai_fields.s
 
 全テーブルでRLS有効、ポリシーなし（デフォルト全拒否）。サーバー側のみ SUPABASE_SERVICE_ROLE_KEY でアクセス。
 
-テスト: vitest で 593テスト、37ファイル。全テストで LINE API/Supabase/Claude はモック。
+テスト: vitest で 640テスト、38ファイル。全テストで LINE API/Supabase/Claude はモック。
 
 ## 技術スタック
 
@@ -61,6 +61,7 @@ DB移行: 0001_init.sql (faq/menus/conversations), 0002_conversation_ai_fields.s
 - `app/api/line/webhook/route.ts`: LINE Message Event → 署名検証 → conversationsへ inbound ログ → Claude/FAQ回答 → LINE replyMessage/Push → conversations へ outbound ログ
 - 二重処理防止: line_message_id の unique constraint + duplicate webhook 検知
 - 処理失敗時は inbound ログをロールバック（LINEの再送を許可）
+- 送信回数の上限: `lib/faq/rate-limit.ts`（直近1時間10件・24時間30件。任意の環境変数 `RATE_LIMIT_MAX_PER_HOUR` / `RATE_LIMIT_MAX_PER_DAY`）。超過時は Claude を呼ばず `RATE_LIMITED_REPLY_TEXT` を返信し、上限を超えた1件目だけオーナー通知。件数取得失敗・受信ログ未保存・非テキスト等は制限しない（fail-open）
 
 **管理画面認証** (Phase 3):
 - `proxy.ts`: 楽観的チェック（Optimistic check）のみ。実際の保護は `lib/admin/auth.ts::requireAdmin()` で全ページ・Server Action・データ関数で実施

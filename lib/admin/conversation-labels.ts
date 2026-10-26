@@ -1,4 +1,4 @@
-import { API_FAILURE_REPLY_TEXT } from "@/lib/faq/reply-templates";
+import { API_FAILURE_REPLY_TEXT, RATE_LIMITED_REPLY_TEXT } from "@/lib/faq/reply-templates";
 import type { Tone } from "@/lib/admin/tone";
 import type { ConversationConfidence } from "@/types/database";
 
@@ -67,6 +67,7 @@ export type BotReplyLabel = {
 /**
  * Botの返信(outbound)がどの経路で送られたかを日本語ラベルにする。
  * 判定はWebhookが保存する値の組み合わせに対応する(app/api/line/webhook/route.ts参照):
+ * - 送信回数上限の固定文言 → 上限超過(escalatedは「オーナー通知した1件目か」を表すため先に判定する)
  * - escalated=true          → スタッフ確認(confidence=lowの固定文言)
  * - confidence=high/medium  → FAQにもとづく自動回答
  * - confidence=null         → AI判定を経ない返信(システム障害時のお詫び文・テキスト以外への定型文など)
@@ -77,6 +78,18 @@ export function describeBotReply(params: {
   messageText: string | null;
 }): BotReplyLabel {
   const { confidence, escalated, messageText } = params;
+
+  // 文言の完全一致で判定するため、RATE_LIMITED_REPLY_TEXTを変更すると過去のログは
+  // このラベルにならない（API_FAILURE_REPLY_TEXTと同じ方式）。
+  if (messageText === RATE_LIMITED_REPLY_TEXT) {
+    return {
+      label: "送信回数の上限",
+      tone: "warning",
+      description: escalated
+        ? "お問い合わせが多いため、AIを使わずに定型文を返信しました。上限を超えた1件目のため、オーナーへのLINE通知の対象です。"
+        : "お問い合わせが多いため、AIを使わずに定型文を返信しました（オーナーへの通知は上限を超えた1件目のみ）。",
+    };
+  }
 
   if (escalated) {
     return {

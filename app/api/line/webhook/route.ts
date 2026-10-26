@@ -6,9 +6,11 @@ import { truncateForLineText } from "@/lib/line/truncate-text";
 import { notifyOwnerOfEscalation } from "@/lib/line/escalate-to-owner";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { answerUserQuestion } from "@/lib/faq/answer-user-question";
+import { checkUserRateLimit } from "@/lib/faq/rate-limit";
 import {
   API_FAILURE_REPLY_TEXT,
   LOW_CONFIDENCE_REPLY_TEXT,
+  RATE_LIMITED_REPLY_TEXT,
 } from "@/lib/faq/reply-templates";
 import type { ConversationConfidence } from "@/types/database";
 
@@ -121,7 +123,12 @@ async function handleMessageEvent(event: webhook.MessageEvent): Promise<void> {
   }
 
   try {
-    await processMessage({ replyToken, lineUserId, message });
+    await processMessage({
+      replyToken,
+      lineUserId,
+      message,
+      inboundLogged: inboundLogResult === "inserted",
+    });
   } catch (error) {
     // 応答の途中で失敗した場合、inbound側の重複防止レコードだけが残ってしまうと、
     // LINEからの正当な再送がここで"duplicate"扱いされ、ユーザーへ永久に返信できなくなる。
@@ -137,12 +144,47 @@ async function processMessage(params: {
   replyToken: string;
   lineUserId: string | undefined;
   message: webhook.MessageContent;
+  /** 今回のメッセージの受信ログを保存できたか（送信回数の判定は保存済みの件数を前提とする） */
+  inboundLogged: boolean;
 }): Promise<void> {
-  const { replyToken, lineUserId, message } = params;
+  const { replyToken, lineUserId, message, inboundLogged } = params;
 
   if (message.type !== "text") {
     await replyAndLog({ replyToken, lineUserId, replyText: NON_TEXT_REPLY_TEXT });
     return;
+  }
+
+  // 受信ログを保存できなかった場合（DB障害・userIdなし）は今回分が件数に含まれず
+  // 正しく判定できないため、制限をかけずに通常どおり回答する（返信自体は止めない）。
+  if (inboundLogged) {
+    const rateLimit = await checkUserRateLimit(lineUserId);
+
+    if (rateLimit.kind === "limited") {
+      // 上限超過時はClaude APIを呼ばず、固定文言のみを返信する。
+      // lineUserIdは顧客データのためログへ出さない。
+      console.warn("Per-user rate limit exceeded; replying without calling Claude.", {
+        notifyOwner: rateLimit.notifyOwner,
+      });
+
+      await replyAndLog({
+        replyToken,
+        lineUserId,
+        replyText: RATE_LIMITED_REPLY_TEXT,
+        confidence: null,
+        matchedFaqIds: null,
+        escalated: rateLimit.notifyOwner,
+      });
+
+      // 上限をちょうど超えた1件目だけ通知する（連投がオーナーへの通知の連投にならないように）。
+      if (rateLimit.notifyOwner) {
+        await notifyOwnerOfEscalation({
+          question: message.text,
+          reason: rateLimit.reason,
+          lineUserId,
+        });
+      }
+      return;
+    }
   }
 
   const result = await answerUserQuestion(message.text);

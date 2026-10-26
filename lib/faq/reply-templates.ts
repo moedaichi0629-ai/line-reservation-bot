@@ -17,3 +17,10 @@ export const API_FAILURE_REPLY_TEXT =
   "申し訳ございません。\n" +
   "現在、自動応答をご利用いただけません。\n" +
   "お手数ですが、時間をおいて再度お問い合わせください。";
+
+/**
+ * お客様ごとの送信回数の上限（lib/faq/rate-limit.ts）を超えた場合に返す固定文言。
+ * Claude APIは呼ばない。上限を超えた1件目ではオーナーへLINE通知が行われる。
+ */
+export const RATE_LIMITED_REPLY_TEXT =
+  "お問い合わせが多いため、スタッフから改めてご連絡します";

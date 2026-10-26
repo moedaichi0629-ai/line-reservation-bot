@@ -78,6 +78,7 @@ macOS / Linux: `openssl rand -base64 24`（パスワード用）、`openssl rand
 - どの変数名にも `NEXT_PUBLIC_` を付けないでください（付けるとブラウザに公開されます）。このアプリは `NEXT_PUBLIC_` の変数を1つも使いません。
 - `ADMIN_PASSWORD` が12文字未満、`ADMIN_SESSION_SECRET` が32文字未満だと、管理画面に誰もログインできません（安全側に倒す設計）。
 - 開発用と本番用で、`ADMIN_PASSWORD` / `ADMIN_SESSION_SECRET` は別の値にしてください。
+- 任意の変数 `RATE_LIMIT_MAX_PER_HOUR`（既定 10）・`RATE_LIMIT_MAX_PER_DAY`（既定 30）は、未設定でも動作します。お客様ごとのAI回答の上限を変えるもので、正の整数のみ有効です。秘密情報ではありません。
 
 ---
 
