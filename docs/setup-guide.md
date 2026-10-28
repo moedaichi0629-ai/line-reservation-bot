@@ -59,6 +59,7 @@ cp .env.example .env.local
 | `OWNER_LINE_USER_ID` | スタッフ確認の通知先・お知らせのテスト送信先 | LINE Developers > チャネル基本設定 >「あなたのユーザーID」など（オーナー本人の ID） |
 | `ADMIN_PASSWORD` | 管理画面のパスワード | 自分で生成（**12文字以上**。16文字以上のランダム値を推奨） |
 | `ADMIN_SESSION_SECRET` | ログイン Cookie の署名用 | 自分で生成（**32文字以上**のランダム値） |
+| `CRON_SECRET` | Supabase 一時停止対策の Cron の保護用 | 自分で生成（**16文字以上**のランダム値。セッション用と同じコマンドで別の値を作る） |
 
 ランダムな値の作り方（Windows PowerShell）:
 
@@ -78,6 +79,7 @@ macOS / Linux: `openssl rand -base64 24`（パスワード用）、`openssl rand
 - どの変数名にも `NEXT_PUBLIC_` を付けないでください（付けるとブラウザに公開されます）。このアプリは `NEXT_PUBLIC_` の変数を1つも使いません。
 - `ADMIN_PASSWORD` が12文字未満、`ADMIN_SESSION_SECRET` が32文字未満だと、管理画面に誰もログインできません（安全側に倒す設計）。
 - 開発用と本番用で、`ADMIN_PASSWORD` / `ADMIN_SESSION_SECRET` は別の値にしてください。
+- `CRON_SECRET` はローカル開発では使われません（Vercel Cron は本番デプロイでのみ動きます）。ローカルで `/api/cron/keep-alive` を試す場合は `Authorization: Bearer <CRON_SECRET>` を付けて GET します。
 - 任意の変数 `RATE_LIMIT_MAX_PER_HOUR`（既定 10）・`RATE_LIMIT_MAX_PER_DAY`（既定 30）は、未設定でも動作します。お客様ごとのAI回答の上限を変えるもので、正の整数のみ有効です。秘密情報ではありません。
 
 ---
@@ -172,10 +174,11 @@ npm run build        # 本番ビルド
 1. Vercel でプロジェクトを作成し、GitHub リポジトリと連携します。
    - 連携すると **`main` への push がそのまま本番デプロイ**になります。
 2. Framework Preset: Next.js。Node.js: 22 以上。
-3. **Settings > Environment Variables** に、3章の8つの変数を登録します。
+3. **Settings > Environment Variables** に、3章の9つの変数を登録します。
    - **対象の環境は Production のみ**にしてください。
    - Preview に登録すると、プレビュー URL の管理画面から、本番と同じ LINE チャネル・同じデータベースで**友だち全員への一斉配信ができてしまいます**。
-   - 本番用の `ADMIN_PASSWORD` / `ADMIN_SESSION_SECRET` は開発用と別の値にします。
+   - 本番用の `ADMIN_PASSWORD` / `ADMIN_SESSION_SECRET` / `CRON_SECRET` は開発用と別の値にします。
+   - **`CRON_SECRET` を忘れずに登録してください。** 未登録だと、Supabase の一時停止を防ぐ毎日の Cron（`vercel.json`）が失敗します。
 4. 環境変数を登録・変更した後は再デプロイします（既存のデプロイには反映されません）。
 5. デプロイが成功したら、5章の Webhook URL を本番 URL に切り替えます。
 
@@ -191,6 +194,7 @@ npm run build        # 本番ビルド
 - [ ] オーナー以外のテスト用 LINE アカウントから FAQ にある内容を送ると、FAQ にもとづく回答が返る
 - [ ] 管理画面の会話ログに、そのやり取りが記録されている
 - [ ] お知らせ配信画面が表示される（下書き保存まで。テスト送信は送信枠を1通使うため必要な場合のみ）
+- [ ] Vercel > Settings > Cron Jobs で `/api/cron/keep-alive` を「Run」し、Logs で `200` になる
 - [ ] Vercel の Logs にエラーが出ていない
 
 詳しい確認項目は [deploy-checklist.md](deploy-checklist.md) の6章にあります。

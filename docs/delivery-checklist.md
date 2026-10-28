@@ -36,6 +36,7 @@
 - [ ] 画像・スタンプを送ると「テキストメッセージのみ対応しています。」が返る
 - [ ] （任意・送信枠を1通使う）FAQ に無い質問を送ると、スタッフ確認の定型文が返り、オーナーの LINE に通知が届く
 - [ ] 上のやり取りが会話ログに記録されている
+- [ ] Supabase 一時停止対策の Cron（`/api/cron/keep-alive`）を Vercel > Settings > Cron Jobs の「Run」で実行し、Logs で `200` になる（[deploy-checklist.md](deploy-checklist.md) 6-4）
 - [ ] スマートフォン（幅 約400px）で管理画面が崩れずに操作できる
 - [ ] `npm run type-check` / `lint` / `test` / `build` がすべて成功する
 
@@ -43,11 +44,13 @@
 
 - [ ] API キー・トークン・パスワードが GitHub（コード・履歴・ドキュメント）に含まれていない
 - [ ] `.env.local` が `.gitignore` の対象で、Git に含まれていない（Git にあるのは値が空の `.env.example` のみ）
-- [ ] Vercel の環境変数8個が **Production のみ**に登録されている（Preview / Development には秘密情報なし）
+- [ ] Vercel の環境変数9個（`CRON_SECRET` を含む）が **Production のみ**に登録されている（Preview / Development には秘密情報なし）
 - [ ] どの環境変数にも `NEXT_PUBLIC_` が付いていない
 - [ ] Supabase の4テーブルで RLS が有効・ポリシー0件（[deploy-checklist.md](deploy-checklist.md) 3-1 の SQL）
 - [ ] 管理画面のパスワードが本番用の長いランダム値（12文字以上、推奨16文字以上）で、開発用と別
 - [ ] `ADMIN_SESSION_SECRET` が本番用の32文字以上のランダム値で、開発用と別
+- [ ] `CRON_SECRET` が本番用の16文字以上のランダム値で、他のシークレットと別
+- [ ] 本番の `/api/cron/keep-alive` をブラウザで直接開くと `401` になる
 - [ ] ログイン試行回数の制限（Vercel Firewall）を設定した、または使えない場合の対応を記録した
 
 ## 5. ドキュメント

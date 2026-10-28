@@ -32,7 +32,7 @@ DB移行: 0001_init.sql (faq/menus/conversations), 0002_conversation_ai_fields.s
 
 全テーブルでRLS有効、ポリシーなし（デフォルト全拒否）。サーバー側のみ SUPABASE_SERVICE_ROLE_KEY でアクセス。
 
-テスト: vitest で 640テスト、38ファイル。全テストで LINE API/Supabase/Claude はモック。
+テスト: vitest で 656テスト、40ファイル。全テストで LINE API/Supabase/Claude はモック。
 
 ## 技術スタック
 
@@ -76,6 +76,10 @@ DB移行: 0001_init.sql (faq/menus/conversations), 0002_conversation_ai_fields.s
 - `lib/admin/announcement-policy.ts`: 送信可能期間（作成から23h）・状態判定・UI表示ロジック
 - maxDuration リテラル（60秒）は `app/admin/(protected)/announcements/page.tsx` と `app/admin/(protected)/layout.tsx` に記載、`STALE_SENDING_THRESHOLD_MS` (10分) と同期必須（テストで検証）
 - Server Actionが`redirect()`するとページの部品が作り直されるため、入力途中の本文は `announcements/draft-store.ts`（useSyncExternalStore）に保持する
+
+**Supabase 一時停止対策**:
+- `app/api/cron/keep-alive/route.ts`: Vercel Cron（`vercel.json`、1日1回）から呼ばれ、`faq` を1行読み取る
+- `CRON_SECRET` で Bearer 認証。未設定・16文字未満は DB に触れず 500（fail-closed）
 
 **スキーマ検証**:
 - `lib/admin/schemas.ts`: Zod スキーマ（Server Action用）

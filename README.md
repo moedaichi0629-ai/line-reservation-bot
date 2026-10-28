@@ -114,6 +114,10 @@ LINEからの質問に対して、登録済みFAQをもとに自動回答しま�
   - 下書き保存 → 管理者だけへのテスト送信 → 確認ダイアログを経て友だち全員へ配信
   - 状態管理（下書き / 配信処理中 / 配信済み / 配信失敗）と二重配信防止
 
+### 運用: Supabase の一時停止対策
+- Supabase 無料プランは7日間アクセスが無いとプロジェクトが一時停止されるため、Vercel Cron で1日1回（UTC 18:00 = 日本時間 午前3時ごろ）`/api/cron/keep-alive` を呼び、`faq` テーブルを1行だけ読み取ります（書き込みなし）
+- `CRON_SECRET` で保護しています。Vercel が `Authorization: Bearer <CRON_SECRET>` を付けて呼び出し、一致しないリクエストは `401`。`CRON_SECRET` が未設定・16文字未満の場合は DB に触れず `500` を返します
+
 ## 工夫した点
 
 - **AI の回答をそのまま使わない**: Claude には回答と一緒に確信度（high/medium/low）と根拠 FAQ の ID を構造化出力（Zod スキーマ）で返させ、自己申告のまま信用せずにサーバー側で検証しています。
@@ -122,7 +126,7 @@ LINEからの質問に対して、登録済みFAQをもとに自動回答しま�
 - **一斉配信の二重配信防止**: 状態の原子的な条件付き UPDATE（下書き/失敗 → 配信処理中）、LINE の `X-Line-Retry-Key`、retry key の有効期限（24時間）より短い23時間の送信期限を組み合わせています。結果が分からなくなった配信は自動再送せず、「状態確認が必要」と表示します。
 - **非エンジニア向けの管理画面**: スマートフォン幅を前提にした大きなボタン、専門用語を避けた日本語、削除・一斉配信・最後の公開 FAQ を非公開にする操作の確認ダイアログ、送信中のボタン無効化。
 - **秘密情報をサーバー側に限定**: 環境変数はすべてサーバー側だけで参照し（`NEXT_PUBLIC_` は不使用）、`server-only` でクライアントからの import をビルド時に防止。Supabase は RLS 全拒否 + サーバー側のみ service role でアクセスします。ビルド成果物に秘密情報が含まれないことも確認しています。
-- **テスト**: Vitest で 640 テスト。LINE・Supabase・Claude をモックし、Webhook の結合テスト、DB の CHECK 制約を再現したフェイクでの配信ロジック検証、「全ページ・全 Server Action が認証を確認しているか」のテストを含みます。
+- **テスト**: Vitest で 656 テスト。LINE・Supabase・Claude をモックし、Webhook の結合テスト、DB の CHECK 制約を再現したフェイクでの配信ロジック検証、「全ページ・全 Server Action が認証を確認しているか」のテストを含みます。
 
 ## 技術スタック
 
@@ -144,6 +148,7 @@ LINEからの質問に対して、登録済みFAQをもとに自動回答しま�
 line-reservation-bot/
 ├── app/
 │   ├── api/line/webhook/route.ts     # LINE Webhook
+│   ├── api/cron/keep-alive/route.ts  # Supabase 一時停止対策（Vercel Cron から1日1回）
 │   └── admin/                        # 管理画面（/admin）
 │       ├── login/                    # ログイン
 │       └── (protected)/              # 認証必須エリア
@@ -163,6 +168,7 @@ line-reservation-bot/
 ├── tests/                            # Vitest
 ├── docs/                             # ドキュメント
 ├── proxy.ts                          # /admin の楽観的認証チェック
+├── vercel.json                       # Vercel Cron の設定
 └── .env.example                      # 環境変数テンプレート（値は空）
 ```
 
@@ -174,7 +180,7 @@ line-reservation-bot/
 git clone https://github.com/moedaichi0629-ai/line-reservation-bot.git
 cd line-reservation-bot
 npm install
-cp .env.example .env.local   # 8つの環境変数を設定
+cp .env.example .env.local   # 9つの環境変数を設定
 npm run dev                  # http://localhost:3000/admin
 ```
 
@@ -190,6 +196,7 @@ npm run dev                  # http://localhost:3000/admin
 | `OWNER_LINE_USER_ID` | スタッフ確認の通知先・お知らせのテスト送信先 |
 | `ADMIN_PASSWORD` | 管理画面のパスワード（12文字以上） |
 | `ADMIN_SESSION_SECRET` | ログイン Cookie の署名用（32文字以上） |
+| `CRON_SECRET` | Supabase 一時停止対策の Cron の保護用（16文字以上。ローカル開発では Cron は動きません） |
 
 任意の環境変数（未設定でも動作します）: `RATE_LIMIT_MAX_PER_HOUR`（既定 10）・`RATE_LIMIT_MAX_PER_DAY`（既定 30）。お客様ごとのAI回答の上限を変えます。秘密情報ではありません。
 
@@ -204,7 +211,7 @@ Supabase では `supabase/migrations/` の 0001 → 0002 → 0003 を順に実�
 | `npm run start` | 本番ビルドの起動 |
 | `npm run lint` | ESLint |
 | `npm run type-check` | TypeScript 型チェック |
-| `npm run test` | Vitest（38ファイル / 640テスト） |
+| `npm run test` | Vitest（40ファイル / 656テスト） |
 
 テストでは LINE・Supabase・Claude はすべてモックで、実際の送信や DB への書き込みは行いません。
 
@@ -212,6 +219,7 @@ Supabase では `supabase/migrations/` の 0001 → 0002 → 0003 を順に実�
 
 GitHub 連携した Vercel にデプロイしています（`main` への push で本番デプロイ）。
 環境変数は **Production のみ**に登録します（Preview に登録すると、プレビュー環境から本番と同じ友だち全員へ配信できてしまうため）。
+**`CRON_SECRET` の登録を忘れないでください。** 未登録だと Supabase 一時停止対策の Cron が毎日 `500` で失敗し、7日間アクセスが無いと Supabase が一時停止されます。Cron は本番デプロイでのみ実行されます（Vercel の Settings > Cron Jobs で確認できます）。
 公開前後の確認項目は **[docs/deploy-checklist.md](docs/deploy-checklist.md)** を参照してください。
 
 ## セキュリティ
@@ -219,6 +227,7 @@ GitHub 連携した Vercel にデプロイしています（`main` への push �
 - **LINE Webhook**: 全リクエストの署名（HMAC-SHA256）を検証し、不一致は `401` で処理しません。サーバーログにはエラー名などの要約だけを出し、質問文やトークンは出しません（会話内容は DB の会話ログにのみ保存）。
 - **管理画面**: パスワード（12文字以上）+ HMAC 署名付き Cookie（30日、`/admin` パスのみ、httpOnly）。全ページ・Server Action・データ取得関数で `requireAdmin()` を呼び、テストで強制しています。`proxy.ts` は楽観的チェックのみです。
 - **データベース**: 全4テーブルで RLS 有効・ポリシー0件（デフォルト全拒否）。サーバー側だけが `SUPABASE_SERVICE_ROLE_KEY` でアクセスします。
+- **Cron エンドポイント**: `/api/cron/keep-alive` は `CRON_SECRET` を定数時間で比較し、不一致は `401`。未設定時は DB に触れず失敗します（fail-closed）。レスポンスに DB のデータやエラー詳細は含めません。
 - **環境変数**: `NEXT_PUBLIC_` は使いません。`.env*` は `.gitignore` で除外しています（`.env.example` のみ管理）。
 - **個人情報**: 管理画面では LINE ユーザーIDを末尾4文字だけ表示し、URL にも含めません。
 
@@ -228,6 +237,7 @@ GitHub 連携した Vercel にデプロイしています（`main` への push �
 
 - メニュー・料金は Bot の回答に使われません（Bot に答えさせる内容は FAQ に登録）
 - お客様ごとの送信回数の上限はベストエフォートです。並行した送信では、上限超過のオーナー通知が0回または2回になることがあります（上限は1時間・24時間それぞれで、超えるたびに通知）。上限値の変更は環境変数と再デプロイのみで、管理画面からは変更できません
+- Supabase 一時停止対策の Cron は Vercel Hobby プランでは実行時刻が指定した1時間の中でずれます。また Cron が失敗しても通知はありません（Vercel の Logs で確認）
 - ログイン試行回数の制限はコードに無く、Vercel Firewall でのレート制限を前提としています
 - ログイン状態を個別に無効化できません（`ADMIN_SESSION_SECRET` の変更で全員ログアウト）
 - 「状態確認が必要」になったお知らせを画面から復旧できません（SQL で対応）

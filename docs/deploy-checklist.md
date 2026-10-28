@@ -20,7 +20,7 @@
 
 ## 2. 本番用シークレットの作成
 
-`ADMIN_PASSWORD` と `ADMIN_SESSION_SECRET` は、開発用（`.env.local`）とは別の値を本番用に新しく作成します。
+`ADMIN_PASSWORD`・`ADMIN_SESSION_SECRET`・`CRON_SECRET` は、開発用（`.env.local`）とは別の値を本番用に新しく作成します。
 **`Get-Random` は暗号用の乱数ではないため、秘密情報の生成には使わないでください。** Windows PowerShell では次のコマンドを使います。
 
 ```powershell
@@ -29,9 +29,12 @@ $b = New-Object byte[] 24; [Security.Cryptography.RandomNumberGenerator]::Create
 
 # ADMIN_SESSION_SECRET 用（44文字）
 $b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)
+
+# CRON_SECRET 用（44文字）。ADMIN_SESSION_SECRET とは別の値をもう一度作成する
+$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)
 ```
 
-macOS / Linux の場合は `openssl rand -base64 24`（パスワード用）/ `openssl rand -base64 32`（セッション用）。
+macOS / Linux の場合は `openssl rand -base64 24`（パスワード用）/ `openssl rand -base64 32`（セッション用・Cron 用。それぞれ別に実行）。
 
 - [ ] `ADMIN_PASSWORD` を作成した
   - 実装上の条件: **12文字以上**（未満だとログイン自体ができない）。ログイン画面で受け付ける最大長は200文字
@@ -39,7 +42,10 @@ macOS / Linux の場合は `openssl rand -base64 24`（パスワード用）/ `o
 - [ ] `ADMIN_SESSION_SECRET` を作成した
   - 実装上の条件: **32文字以上**（未満だと誰もログイン状態にならない）
   - この値を変更すると、全員のログイン状態が無効になる（全員の強制ログアウトに使える）
-- [ ] 2つの値をパスワードマネージャー等に保存した（チャット・メール・コードに貼らない）
+- [ ] `CRON_SECRET` を作成した
+  - 実装上の条件: **16文字以上**（未満・未設定だと Supabase 一時停止対策の Cron が毎回失敗する）
+  - 他の2つとは別の値にする
+- [ ] 3つの値をパスワードマネージャー等に保存した（チャット・メール・コードに貼らない）
 
 ---
 
@@ -70,7 +76,8 @@ where n.nspname = 'public'
 
 ### 3-2. プランの確認（要確認）
 
-- [ ] **要確認**: 無料（Free）プランの場合、利用が無い期間が続くとプロジェクトが一時停止される条件があるか。一時停止中は Bot の返信・管理画面の両方が動かない
+- [ ] 無料（Free）プランは、7日間アクセスが無いとプロジェクトが一時停止される。一時停止中は Bot の返信・管理画面の両方が動かない
+  - 対策として、Vercel Cron が1日1回 `/api/cron/keep-alive` を呼び、`faq` テーブルを1行読み取る（`vercel.json`）。**`CRON_SECRET` を Vercel に登録しないと動かない**（4-2・6-4）
 - [ ] **要確認**: 無料プランで利用できるバックアップの内容。必要なら運用開始前に手動でデータを控える
 - [ ] **要確認**: 現在の使用量（データベース容量など）が上限に対して余裕があるか
 
@@ -125,7 +132,7 @@ delete from public.menus where id = '<id>';
 
 ### 4-2. 環境変数（Project > Settings > Environment Variables）
 
-次の8つを登録します（必須）。**対象の環境は Production のみ**にしてください。
+次の9つを登録します（必須）。**対象の環境は Production のみ**にしてください。
 
 > Preview に同じ値を登録すると、プレビュー用URLの管理画面から、本番と同じ LINE チャネル・同じデータベースを使って **友だち全員への一斉配信ができてしまいます**。Preview・Development には秘密情報を登録しないでください。
 
@@ -139,6 +146,7 @@ delete from public.menus where id = '<id>';
 | `OWNER_LINE_USER_ID` | スタッフ確認の通知先・テスト送信の宛先 | 開発時に使っている値（オーナーへのテスト送信で動作確認済みの値） |
 | `ADMIN_PASSWORD` | 管理画面のパスワード | 手順2で作成した本番用の値 |
 | `ADMIN_SESSION_SECRET` | ログイン状態の署名用 | 手順2で作成した本番用の値 |
+| `CRON_SECRET` | Supabase 一時停止対策の Cron の保護用。Vercel が Cron の呼び出し時に自動で `Authorization` ヘッダーに付ける | 手順2で作成した本番用の値 |
 
 任意の環境変数（未登録でも動作する。上限値を変えたいときだけ登録する）:
 
@@ -151,7 +159,8 @@ delete from public.menus where id = '<id>';
 - 秘密情報ではないが、登録する場合は他の変数と同じく Production のみに登録する
 - 変更は再デプロイが必要。値の変更内容は [technical-spec.md](technical-spec.md) 6章を参照
 
-- [ ] 8つすべてを Production に登録した
+- [ ] 9つすべてを Production に登録した
+- [ ] **`CRON_SECRET` を登録した**（新しく追加した変数のため忘れやすい。未登録だと Cron が毎日失敗し、Supabase が一時停止されるおそれがある）
 - [ ] （任意）上限値を変える場合のみ、2つの任意変数を Production に登録した
 - [ ] どの変数名にも `NEXT_PUBLIC_` を付けていない（付けるとブラウザに公開される。アプリでは一切使っていない）
 - [ ] Preview / Development に秘密情報を登録していない
@@ -163,6 +172,7 @@ delete from public.menus where id = '<id>';
 - [ ] Node.js のバージョンが 22 以上（`package.json` の `engines` が `>=22`）
 - [ ] 任意: 関数の実行リージョンを Supabase（Tokyo）に近いリージョンにする（Project > Settings > Functions）。Webhook は1通ごとに Supabase へ複数回アクセスするため、応答が速くなる。**要確認**: Hobby プランで変更できるか
 - [ ] 参考: 管理画面の処理（お知らせ配信を含む）は最大60秒で打ち切られる設定がコードに入っている（`maxDuration = 60`）。Vercel 側での設定は不要
+- [ ] 参考: Cron の設定は `vercel.json` にあり、デプロイ時に自動で登録される。Vercel 側での追加設定は不要（`CRON_SECRET` の登録のみ必要）。Cron は本番デプロイでのみ動き、プレビューデプロイでは動かない
 
 ### 4-4. ログイン試行回数の制限（Vercel Firewall）
 
@@ -260,6 +270,13 @@ delete from public.menus where id = '<id>';
   - テスト送信後も、お知らせの状態は「下書き」のまま（状態や再送用キーは変わらない）
 - [ ] **友だち全員への配信は、送信枠（友だちの人数分）を確認したうえで、オーナーが実施を判断したときだけ行う**
 
+### 6-4. Supabase 一時停止対策の Cron
+
+- [ ] Vercel > Project > Settings > Cron Jobs に `/api/cron/keep-alive`（`0 18 * * *` = 日本時間 午前3時ごろ、1日1回）が表示されている
+- [ ] 同じ画面の「Run」で手動実行し、Vercel の Logs で `/api/cron/keep-alive` が `200` になっている
+  - `500` の場合は `CRON_SECRET` が未登録・16文字未満、または登録後に再デプロイしていない。登録を見直して再デプロイする
+- [ ] ブラウザで `https://<本番ドメイン>/api/cron/keep-alive` を直接開くと `401`（`{"error":"unauthorized"}`）になる（外部から勝手に呼べないことの確認）
+
 ---
 
 ## 7. 公開後の確認・運用
@@ -269,6 +286,7 @@ delete from public.menus where id = '<id>';
   - お客様ごとの送信回数には上限がある（直近1時間10件・直近24時間30件。超えると AI を使わず定型文を返し、上限超過の1件目だけオーナーに通知）。ただし上限はベストエフォートで、通知は0〜2回になり得る
   - 会話ログで「送信回数の上限」の表示が繰り返し出る場合は、連投や悪用を疑って内容を確認する
   - 送信枠を使い切ると、一斉配信・スタッフ確認の通知が「送信上限」で失敗する
+- [ ] Vercel の Logs で、`/api/cron/keep-alive` が毎日 `200` になっているかをときどき確認する（失敗しても通知は来ない。Hobby プランでは実行時刻が指定した1時間の中でずれる）
 - [ ] Anthropic Console で利用状況を確認する。**要確認**: 利用上限額（Spend limit）を設定するか
 - [ ] お知らせが「状態確認が必要」になった場合は `docs/operations.md` の手順で対応する（自動再送はしない）
 - [ ] 管理画面にログインできる端末を紛失した場合などは、`ADMIN_SESSION_SECRET` を変更して再デプロイし、全員をログアウトさせる（パスワードを変更しても既存のログイン状態は無効にならない）

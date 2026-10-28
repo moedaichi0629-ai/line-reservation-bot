@@ -13,6 +13,7 @@
 - 回答の確信度が低い・根拠となる FAQ が無い場合は、AI の回答を送らずに定型文を返し、オーナーへ LINE で通知する
 - お客様ごとの送信回数に上限を設け、超えた場合は AI を使わずに定型文を返す（6章）
 - 管理画面で FAQ・メニュー・料金の編集、会話ログの閲覧、友だち全員へのお知らせ配信を行う
+- Supabase 無料プランの一時停止を防ぐため、Vercel Cron で1日1回データベースへ軽い読み取りを行う（14章）
 
 ---
 
@@ -87,6 +88,7 @@ flowchart LR
 ```
 app/
   api/line/webhook/route.ts        LINE Webhook
+  api/cron/keep-alive/route.ts     Supabase 一時停止対策（Vercel Cron から1日1回。14章）
   admin/login/                     ログイン画面・ログイン/ログアウト Action
   admin/(protected)/               認証必須エリア（layout で requireAdmin）
     faq/ menus/ conversations/ announcements/
@@ -100,8 +102,9 @@ lib/
 components/admin/                  管理画面の共通部品
 proxy.ts                           /admin の楽観的認証チェック
 next.config.ts                     /admin のセキュリティヘッダー
+vercel.json                        Vercel Cron の設定（14章）
 supabase/migrations/               0001〜0003
-tests/                             Vitest（38ファイル / 640テスト）
+tests/                             Vitest（40ファイル / 656テスト）
 ```
 
 ---
@@ -419,13 +422,14 @@ Server Action の `redirect()` でページの部品が作り直されるため�
 |---|---|
 | LINE 署名検証 | 全 Webhook リクエストで HMAC-SHA256 を検証。失敗は `401` で処理しない |
 | service role キー | `lib/supabase/server.ts` のみで使用。`server-only` により Client Component から import するとビルドエラー |
-| 秘密情報 | 必須の8つの環境変数はすべてサーバー側のみで参照。任意の `RATE_LIMIT_*` は秘密ではない。`NEXT_PUBLIC_` の変数は使わない |
+| 秘密情報 | 必須の9つの環境変数はすべてサーバー側のみで参照。任意の `RATE_LIMIT_*` は秘密ではない。`NEXT_PUBLIC_` の変数は使わない |
 | クライアントバンドル | Client Component は `lib/admin/schemas.ts`（Zod）を import しない。上限値は `lib/admin/input-limits.ts` から参照 |
 | RLS | 全4テーブルで有効、ポリシー0件（anon / authenticated は全拒否） |
 | 管理画面 | 全ページ・Server Action・データ関数で `requireAdmin()`。セキュリティヘッダーと `noindex` |
 | LINE ユーザーID | 管理画面では末尾4文字のみ。オーナーへの通知 Push には全体が含まれる |
 | ログ | エラー名や分類値のみを出力し、トークン・質問全文・生のイベントは出さない |
 | 入力検証 | サーバー側で Zod 検証（長さ・空白のみ・制御文字・数値範囲・UUID 形式） |
+| Cron エンドポイント | `CRON_SECRET` による Bearer 認証（SHA-256 ダイジェスト同士を `timingSafeEqual` で比較）。未設定・16文字未満は DB に触れず `500`（fail-closed）（14章） |
 
 ---
 
@@ -448,13 +452,14 @@ Server Action の `redirect()` でページの部品が作り直されるため�
 | お知らせ・会話ログの削除 UI なし | 管理画面から削除できない | 必要なら SQL Editor で個別に削除 |
 | お知らせはテキスト1通のみ | 画像等は非対応。下書きの編集も不可 | 作り直す |
 | 配信可能数の表示なし | LINE の利用状況 API は未使用 | LINE Official Account Manager で確認 |
+| Cron の実行時刻・失敗通知 | Hobby プランでは指定した1時間の中で実行時刻がずれる。失敗しても通知は無い | Vercel の Logs で `/api/cron/keep-alive` が `200` か定期確認（14章） |
 | URL クエリの完了メッセージ | `?success=` 等をそのまま表示（テキストのみ） | 細工した URL で任意の文言を表示させられる（XSS ではない） |
 
 ---
 
 ## 13. テスト
 
-- Vitest、38ファイル / 640テスト（`npm run test`）
+- Vitest、40ファイル / 656テスト（`npm run test`）
 - LINE・Supabase・Claude はすべてモック。実際の送信・DB 書き込みは行わない
 - 主なテスト
   - `tests/integration/phase2-flow.test.ts`: Webhook ハンドラーを実際に呼ぶ結合テスト（外部 I/O のみモック）。送信回数の上限も実際の `lib/faq/rate-limit.ts` を通して検証
@@ -463,3 +468,25 @@ Server Action の `redirect()` でページの部品が作り直されるため�
   - `tests/app/admin/announcements/security.test.ts`: お知らせ配信のセキュリティと、管理画面の全ページが `requireAdmin()` を呼んでいるか
   - `tests/lib/admin/fake-announcements-db.ts`: 0003 の CHECK 制約を再現したインメモリ DB で配信ロジックを検証
   - `tests/supabase/migrations.test.ts`: マイグレーション SQL の静的検証
+  - `tests/app/api/cron/keep-alive/route.test.ts`: Cron の認証（不正ヘッダー・未設定・短すぎる値）、`faq` の1行読み取り、エラー詳細を出さないこと
+  - `tests/vercel-config.test.ts`: `vercel.json` の Cron の path に Route Handler が実在し、1日1回のスケジュールであること
+
+---
+
+## 14. Supabase 一時停止対策（Vercel Cron）
+
+Supabase 無料プランは、7日間アクセスが無いとプロジェクトが一時停止される。お問い合わせが少ない期間にも止まらないよう、1日1回データベースへアクセスする。
+
+| 項目 | 内容 |
+|---|---|
+| エンドポイント | `GET /api/cron/keep-alive`（`app/api/cron/keep-alive/route.ts`） |
+| スケジュール | `vercel.json` の `crons`。`0 18 * * *`（UTC 18:00 = 日本時間 午前3時ごろ、1日1回）。本番デプロイでのみ実行される |
+| 認証 | Vercel は環境変数 `CRON_SECRET` があると `Authorization: Bearer <CRON_SECRET>` を付けて呼び出す。一致しなければ `401` |
+| 設定ミス時 | `CRON_SECRET` が未設定・16文字未満なら、DB に触れず `500`（誰でも呼べる状態にしない） |
+| クエリ | `faq` から `id` を1行だけ読み取る（`select("id").limit(1)`）。書き込みなし |
+| レスポンス | 成功 `200 {"ok":true}`。DB のデータ・エラー詳細は含めない。`Cache-Control: no-store` |
+| ログ | 失敗時はエラーコード・エラー名のみ |
+| 確認方法 | Vercel > Settings > Cron Jobs で「Run」して Logs が `200` になること（[deploy-checklist.md](deploy-checklist.md) 6-4） |
+
+- `proxy.ts` の matcher は `/admin` のみのため、このルートには影響しない
+- Webhook フロー（5・6章）とは独立しており、変更していない
